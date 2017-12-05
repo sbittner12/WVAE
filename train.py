@@ -17,19 +17,21 @@ import time
 import tensorflow as tf
 from tensorflow.python.client import timeline
 
-from wavenet import WaveNetModel, AudioReader, optimizer_factory
+from wavenet import WaveNetModel, optimizer_factory
+from wavenet.midi_reader import MidiReader
+from wavenet.params import loadParams
 
 BATCH_SIZE = 1
-DATA_DIRECTORY = './VCTK-Corpus'
+DATA_DIRECTORY = './midi-Corpus'
 LOGDIR_ROOT = './logdir'
-CHECKPOINT_EVERY = 50
+CHECKPOINT_EVERY = 500
 NUM_STEPS = int(1e5)
 LEARNING_RATE = 1e-3
-WAVENET_PARAMS = './wavenet_params.json'
+MAX_DILATION_POW  = 5;
+EXPANSION_REPS = 2;
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
 SAMPLE_SIZE = 100000
 L2_REGULARIZATION_STRENGTH = 0
-SILENCE_THRESHOLD = 0.3
 EPSILON = 0.001
 MOMENTUM = 0.9
 MAX_TO_KEEP = 5
@@ -76,19 +78,19 @@ def get_arguments():
                         help='Number of training steps. Default: ' + str(NUM_STEPS) + '.')
     parser.add_argument('--learning_rate', type=float, default=LEARNING_RATE,
                         help='Learning rate for training. Default: ' + str(LEARNING_RATE) + '.')
-    parser.add_argument('--wavenet_params', type=str, default=WAVENET_PARAMS,
-                        help='JSON file with the network parameters. Default: ' + WAVENET_PARAMS + '.')
     parser.add_argument('--sample_size', type=int, default=SAMPLE_SIZE,
                         help='Concatenate and cut audio samples to this many '
                         'samples. Default: ' + str(SAMPLE_SIZE) + '.')
+    parser.add_argument('--max_dilation_pow', type=int, default=MAX_DILATION_POW,
+                        help='Maximum dilation of causal convolutional filter'
+                        'max_dilation_pow. Default: ' + str(MAX_DILATION_POW) + '.')
+    parser.add_argument('--expansion_reps', type=int, default=EXPANSION_REPS,
+                        help='How many times to repeat dilated causal convolutional expansion'
+                        'expansion_reps. Default: ' + str(EXPANSION_REPS) + '.')
     parser.add_argument('--l2_regularization_strength', type=float,
                         default=L2_REGULARIZATION_STRENGTH,
                         help='Coefficient in the L2 regularization. '
                         'Default: False')
-    parser.add_argument('--silence_threshold', type=float,
-                        default=SILENCE_THRESHOLD,
-                        help='Volume threshold below which to trim the start '
-                        'and the end from the training set samples. Default: ' + str(SILENCE_THRESHOLD) + '.')
     parser.add_argument('--optimizer', type=str, default='adam',
                         choices=optimizer_factory.keys(),
                         help='Select the optimizer specified by this option. Default: adam.')
@@ -187,23 +189,19 @@ def validate_directories(args):
 
 def main():
     args = get_arguments()
-
-    try:
-        directories = validate_directories(args)
-    except ValueError as e:
-        print("Some arguments are wrong:")
-        print(str(e))
-        return
-
-    logdir = directories['logdir']
-    restore_from = directories['restore_from']
+    logdir = 'logdir/%d_dilwidth_%d_reps/' % (args.max_dilation_pow, args.expansion_reps);
+    restore_from = logdir
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
 
     # Even if we restored the model, we will treat it as new training
     # if the trained model is written into an arbitrary location.
     is_overwritten_training = logdir != restore_from
 
-    with open(args.wavenet_params, 'r') as f:
-        wavenet_params = json.load(f)
+    wavenet_params = loadParams(args.max_dilation_pow, args.expansion_reps);
+        
+    with open(logdir + 'wavenet_params.json', 'w') as outfile:
+        json.dump(wavenet_params, outfile)
 
     # Create coordinator.
     coord = tf.train.Coordinator()
@@ -212,10 +210,8 @@ def main():
     with tf.name_scope('create_inputs'):
         # Allow silence trimming to be skipped by specifying a threshold near
         # zero.
-        silence_threshold = args.silence_threshold if args.silence_threshold > \
-                                                      EPSILON else None
-        gc_enabled = args.gc_channels is not None
-        reader = AudioReader(
+        gc_enabled = False
+        reader = MidiReader(
             args.data_dir,
             coord,
             sample_rate=wavenet_params['sample_rate'],
@@ -224,41 +220,41 @@ def main():
                                                                    wavenet_params["dilations"],
                                                                    wavenet_params["scalar_input"],
                                                                    wavenet_params["initial_filter_width"]),
-            sample_size=args.sample_size,
-            silence_threshold=silence_threshold)
+            sample_size=args.sample_size)
         audio_batch = reader.dequeue(args.batch_size)
         if gc_enabled:
             gc_id_batch = reader.dequeue_gc(args.batch_size)
         else:
             gc_id_batch = None
-
+            
     # Create network.
     net = WaveNetModel(
-        batch_size=args.batch_size,
+        batch_size=BATCH_SIZE,
         dilations=wavenet_params["dilations"],
         filter_width=wavenet_params["filter_width"],
         residual_channels=wavenet_params["residual_channels"],
         dilation_channels=wavenet_params["dilation_channels"],
         skip_channels=wavenet_params["skip_channels"],
-        quantization_channels=wavenet_params["quantization_channels"],
         use_biases=wavenet_params["use_biases"],
         scalar_input=wavenet_params["scalar_input"],
         initial_filter_width=wavenet_params["initial_filter_width"],
-        histograms=args.histograms,
-        global_condition_channels=args.gc_channels,
+        histograms=False,
+        global_condition_channels=None,
         global_condition_cardinality=reader.gc_category_cardinality)
-
     if args.l2_regularization_strength == 0:
         args.l2_regularization_strength = None
     loss = net.loss(input_batch=audio_batch,
                     global_condition_batch=gc_id_batch,
                     l2_regularization_strength=args.l2_regularization_strength)
-    optimizer = optimizer_factory[args.optimizer](
+
+    print('making optimizer');
+    optimizer = optimizer_factory['adam'](
                     learning_rate=args.learning_rate,
                     momentum=args.momentum)
     trainable = tf.trainable_variables()
     optim = optimizer.minimize(loss, var_list=trainable)
 
+    print('setting up tensorboard');
     # Set up logging for TensorBoard.
     writer = tf.summary.FileWriter(logdir)
     writer.add_graph(tf.get_default_graph())
@@ -271,7 +267,7 @@ def main():
     sess.run(init)
 
     # Saver for storing checkpoints of the model.
-    saver = tf.train.Saver(var_list=tf.trainable_variables(), max_to_keep=args.max_checkpoints)
+    saver = tf.train.Saver(var_list=tf.trainable_variables(), max_to_keep=5)
 
     try:
         saved_global_step = load(saver, sess, restore_from)
@@ -293,6 +289,7 @@ def main():
     last_saved_step = saved_global_step
     try:
         for step in range(saved_global_step + 1, args.num_steps):
+            print('step', step);
             start_time = time.time()
             if args.store_metadata and step % 50 == 0:
                 # Slow run that stores extra information for debugging.
@@ -318,7 +315,7 @@ def main():
             print('step {:d} - loss = {:.3f}, ({:.3f} sec/step)'
                   .format(step, loss_value, duration))
 
-            if step % args.checkpoint_every == 0:
+            if step % CHECKPOINT_EVERY == 0:
                 save(saver, sess, logdir, step)
                 last_saved_step = step
 

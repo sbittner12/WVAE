@@ -8,12 +8,13 @@ import librosa
 import numpy as np
 import tensorflow as tf
 
-import matplotlib.pyplot as plt
+from .midi_utils import midiread
 
 FILE_PATTERN = r'p([0-9]+)_([0-9]+)\.wav'
 
 
 def get_category_cardinality(files):
+    print("WARNING: TODO - update conditional wavenet to support MIDI I/O")
     id_reg_expression = re.compile(FILE_PATTERN)
     min_id = None
     max_id = None
@@ -34,7 +35,7 @@ def randomize_files(files):
         yield files[file_index]
 
 
-def find_files(directory, pattern='*.wav'):
+def find_files(directory, pattern='*.mid'):
     '''Recursively finds all files matching the pattern.'''
     files = []
     for root, dirnames, filenames in os.walk(directory):
@@ -43,11 +44,10 @@ def find_files(directory, pattern='*.wav'):
     return files
 
 
-def load_generic_audio(directory, sample_rate):
+def load_generic_audio(directory):
     '''Generator that yields audio waveforms from the directory.'''
     files = find_files(directory)
     id_reg_exp = re.compile(FILE_PATTERN)
-    print("files length: {}".format(len(files)))
     randomized_files = randomize_files(files)
     for filename in randomized_files:
         ids = id_reg_exp.findall(filename)
@@ -58,28 +58,20 @@ def load_generic_audio(directory, sample_rate):
         else:
             # The file name matches the pattern for containing ids.
             category_id = int(ids[0][0])
-        audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
-        audio = audio.reshape(-1, 1)
-        print('reshaped audio', audio.shape);
+        midifile = midiread(filename);
+        audio  = midifile.piano_roll;
+        #audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
+        #audio = audio.reshape(-1, 1)
+        # audio is (T x 88);
         yield audio, filename, category_id
 
 
-def trim_silence(audio, threshold, frame_length=2048):
+def trim_silence(audio):
     '''Removes silence at the beginning and end of a sample.'''
-    if audio.size < frame_length:
-        frame_length = audio.size
-    print('audio size', audio.size);
-    print('frame length', frame_length)
-    energy = librosa.feature.rmse(audio, frame_length=frame_length)
-    print('energy', energy.shape, np.mean(energy));
-    frames = np.nonzero(energy > threshold)
-    print('frames', frames);
-    indices = librosa.core.frames_to_samples(frames)[1]
-    print('indices', indices.shape);
-    print(indices);
-
-    # Note: indices can be an empty array, if the whole audio was silence.
-    return audio[indices[0]:indices[-1]] if indices.size else audio[0:0]
+    num_notes = np.sum(audio, axis=1);
+    indices = np.argwhere(num_notes > 0);
+    audio_x = audio[indices[0,0]:indices[-1,0]];
+    return audio_x;
 
 
 def not_all_have_id(files):
@@ -93,7 +85,7 @@ def not_all_have_id(files):
     return False
 
 
-class AudioReader(object):
+class MidiReader(object):
     '''Generic background audio reader that preprocesses audio files
     and enqueues them into a TensorFlow queue.'''
 
@@ -103,21 +95,21 @@ class AudioReader(object):
                  sample_rate,
                  gc_enabled,
                  receptive_field,
+                 midi_dims = 88,
                  sample_size=None,
-                 silence_threshold=None,
                  queue_size=32):
         self.audio_dir = audio_dir
         self.sample_rate = sample_rate
         self.coord = coord
         self.sample_size = sample_size
         self.receptive_field = receptive_field
-        self.silence_threshold = silence_threshold
         self.gc_enabled = gc_enabled
         self.threads = []
-        self.sample_placeholder = tf.placeholder(dtype=tf.float32, shape=None)
+        self.midi_dims = midi_dims
+        self.sample_placeholder = tf.placeholder(dtype=tf.float32, shape=(None, midi_dims))
         self.queue = tf.PaddingFIFOQueue(queue_size,
                                          ['float32'],
-                                         shapes=[(None, 1)])
+                                         shapes=[(None, midi_dims)])
         self.enqueue = self.queue.enqueue([self.sample_placeholder])
 
         if self.gc_enabled:
@@ -163,49 +155,36 @@ class AudioReader(object):
         stop = False
         # Go through the dataset multiple times
         while not stop:
-            iterator = load_generic_audio(self.audio_dir, self.sample_rate)
+            iterator = load_generic_audio(self.audio_dir)
             for audio, filename, category_id in iterator:
-                print('audio shape');
-                print(audio.shape);
                 if self.coord.should_stop():
                     stop = True
                     break
-                if self.silence_threshold is not None:
-                    # Remove silence
-                    print('trimming silence');
-                    print('audio[:,0].shape')
-                    print(audio[:,0].shape);
-                    audio = trim_silence(audio[:, 0], self.silence_threshold)
-                    print('trimmed audio', audio.shape);
-                    audio = audio.reshape(-1, 1)
-                    print('trimmed audio reshape', audio.shape);
-                    if audio.size == 0:
-                        print("Warning: {} was ignored as it contains only "
-                              "silence. Consider decreasing trim_silence "
-                              "threshold, or adjust volume of the audio."
-                              .format(filename))
+                # Remove silence
+                audio = trim_silence(audio)
+                #audio = audio.reshape(-1, 1) we don't want to do that at all
+                if audio.size == 0:
+                    print("Warning: {} was ignored as it contains only "
+                          "silence. Consider decreasing trim_silence "
+                          "threshold, or adjust volume of the audio."
+                          .format(filename))
 
                 audio = np.pad(audio, [[self.receptive_field, 0], [0, 0]],
                                'constant')
 
-                print('padded audio', audio.shape);
+
                 if self.sample_size:
                     # Cut samples into pieces of size receptive_field +
                     # sample_size with receptive_field overlap
-                    i = 1;
-                    print('rec field', self.receptive_field);
-                    while len(audio) > self.receptive_field:
+                    while audio.shape[0] > self.receptive_field:
                         piece = audio[:(self.receptive_field +
                                         self.sample_size), :]
-                        print(i, piece.shape);
-                        i += 1;
                         sess.run(self.enqueue,
                                  feed_dict={self.sample_placeholder: piece})
                         audio = audio[self.sample_size:, :]
                         if self.gc_enabled:
                             sess.run(self.gc_enqueue, feed_dict={
                                 self.id_placeholder: category_id})
-                    print('byeee');
                 else:
                     sess.run(self.enqueue,
                              feed_dict={self.sample_placeholder: audio})
