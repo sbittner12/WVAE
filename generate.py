@@ -13,10 +13,9 @@ import tensorflow as tf
 from wavenet import WaveNetModel, mu_law_decode, mu_law_encode, audio_reader
 from wavenet.midi_reader.midi_utils import midiwrite
 
-SAMPLES = 16000
+SAMPLES = 200
 TEMPERATURE = 1.0
 LOGDIR = './logdir'
-WAVENET_PARAMS = './logdir/wavenet_params.json'
 SAVE_EVERY = None
 SILENCE_THRESHOLD = 0.1
 
@@ -38,12 +37,17 @@ def get_arguments():
 
     parser = argparse.ArgumentParser(description='WaveNet generation script')
     parser.add_argument(
-        'checkpoint', type=str, help='Which model checkpoint to generate from')
+        'resdir', type=str, help='Which model directory to generate from')
     parser.add_argument(
         '--samples',
         type=int,
         default=SAMPLES,
         help='How many waveform samples to generate')
+    parser.add_argument(
+        '--gen_num',
+        type=int,
+        default=1,
+        help='Index of complete song generated')
     parser.add_argument(
         '--temperature',
         type=_ensure_positive_float,
@@ -55,11 +59,6 @@ def get_arguments():
         default=LOGDIR,
         help='Directory in which to store the logging '
         'information for TensorBoard.')
-    parser.add_argument(
-        '--wavenet_params',
-        type=str,
-        default=WAVENET_PARAMS,
-        help='JSON file with the network parameters')
     parser.add_argument(
         '--wav_out_path',
         type=str,
@@ -138,7 +137,11 @@ def main():
     args = get_arguments()
     started_datestring = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
     logdir = os.path.join(args.logdir, 'generate', started_datestring)
-    with open(args.wavenet_params, 'r') as config_file:
+    checkpoint = tf.train.latest_checkpoint(args.resdir);
+    print('checkpoint: ', checkpoint);
+    wavenet_params_fname = args.resdir + 'wavenet_params.json';
+    print('wavenet params fname', wavenet_params_fname);
+    with open(wavenet_params_fname, 'r') as config_file:
         wavenet_params = json.load(config_file)
         wavenet_params['midi_dims'] = midi_dims;
 
@@ -178,8 +181,8 @@ def main():
         print(key,variables_to_restore[key]);
 
 
-    print('Restoring model from {}'.format(args.checkpoint))
-    saver.restore(sess, args.checkpoint)
+    print('Restoring model from {}'.format(checkpoint))
+    saver.restore(sess, checkpoint)
 
     if args.wav_seed:
         seed = create_seed(args.wav_seed,
@@ -214,6 +217,7 @@ def main():
             sess.run(outputs, feed_dict={samples: x})
         print('Done.')
 
+    print('receptive field is %d' % net.receptive_field);
     last_sample_timestamp = datetime.now()
     for step in range(args.samples):
         if args.fast_generation:
@@ -227,6 +231,7 @@ def main():
                 window = waveform
             outputs = [next_sample]
 
+        print(step, 'wave shape', waveform.shape, 'window shape', window.shape);
         # Run the WaveNet to predict the next sample.
         prediction = sess.run(outputs, feed_dict={samples: window})[0]
 
@@ -246,6 +251,7 @@ def main():
         #           err_msg='Prediction scaling at temperature=1.0 '
         #                    'is not working as intended.')
         sample = 1*(prediction > 0.5);
+        print('num notes', np.count_nonzero(sample));
         #sample = np.random.choice(
         #    np.arange(quantization_channels), p=scaled_prediction)
         waveform = np.concatenate((waveform, np.expand_dims(sample, 0)), axis=0);
@@ -257,12 +263,6 @@ def main():
             print('Sample {:3<d}/{:3<d}'.format(step + 1, args.samples),
                   end='\r')
             last_sample_timestamp = current_sample_timestamp
-
-        # If we have partial writing, save the result so far.
-        if (args.wav_out_path and args.save_every and
-                (step + 1) % args.save_every == 0):
-            print('writing midi file!');
-            write_wav(waveform, wavenet_params['sample_rate'], args.wav_out_path)
 
     # Introduce a newline to clear the carriage return from the progress.
     print()
@@ -277,10 +277,13 @@ def main():
     #writer.add_summary(summary_out)
 
     # Save the result as a wav file.
-    if args.wav_out_path:
-        #out = sess.run(decode, feed_dict={samples: waveform})
-        filename = args.wav_out_path + 'test.mid'
-        midiwrite(filename, waveform)
+    if args.wav_out_path is None:
+        args.wav_out_path = args.resdir;
+
+    #out = sess.run(decode, feed_dict={samples: waveform})
+    print(args.wav_out_path);
+    filename = args.wav_out_path + ('sample_%d.mid' % int(args.gen_num));
+    midiwrite(filename, waveform)
 
 if __name__ == '__main__':
     main()
