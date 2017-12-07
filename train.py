@@ -243,7 +243,7 @@ def main():
         global_condition_cardinality=reader.gc_category_cardinality)
     if args.l2_regularization_strength == 0:
         args.l2_regularization_strength = None
-    loss = net.loss(input_batch=audio_batch,
+    loss, target_output, prediction = net.loss(input_batch=audio_batch,
                     global_condition_batch=gc_id_batch,
                     l2_regularization_strength=args.l2_regularization_strength)
 
