@@ -27,8 +27,11 @@ LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 500
 NUM_STEPS = int(1e5)
 LEARNING_RATE = 1e-3
-MAX_DILATION_POW  = 5;
-EXPANSION_REPS = 2;
+MAX_DILATION_POW  = 7;
+EXPANSION_REPS = 3;
+DIL_CHAN = 32;
+RES_CHAN = 32;
+SKIP_CHAN = 16;
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
 SAMPLE_SIZE = 100000
 L2_REGULARIZATION_STRENGTH = 0
@@ -84,6 +87,15 @@ def get_arguments():
     parser.add_argument('--max_dilation_pow', type=int, default=MAX_DILATION_POW,
                         help='Maximum dilation of causal convolutional filter'
                         'max_dilation_pow. Default: ' + str(MAX_DILATION_POW) + '.')
+    parser.add_argument('--dil_chan', type=int, default=DIL_CHAN,
+                        help='Number of dilation channels'
+                        'dil_chan. Default: ' + str(DIL_CHAN) + '.')
+    parser.add_argument('--res_chan', type=int, default=RES_CHAN,
+                        help='Number of residual channels'
+                        'res_chan. Default: ' + str(RES_CHAN) + '.')
+    parser.add_argument('--skip_chan', type=int, default=SKIP_CHAN,
+                        help='Number of skip channels'
+                        'skip_chan. Default: ' + str(SKIP_CHAN) + '.')
     parser.add_argument('--expansion_reps', type=int, default=EXPANSION_REPS,
                         help='How many times to repeat dilated causal convolutional expansion'
                         'expansion_reps. Default: ' + str(EXPANSION_REPS) + '.')
@@ -189,7 +201,11 @@ def validate_directories(args):
 
 def main():
     args = get_arguments()
-    logdir = 'logdir/%d_dilwidth_%d_reps/' % (args.max_dilation_pow, args.expansion_reps);
+    logdir = 'logdir/%d_ord_RF_%d_rep_%d_dil_chan_%d_res_chan_%d_skip_chan/' % \
+             (args.max_dilation_pow, args.expansion_reps, args.dil_chan, args.res_chan, args.skip_chan);
+    print('*************************************************');
+    print(logdir);
+    print('*************************************************');
     restore_from = logdir
     if not os.path.exists(logdir):
         os.makedirs(logdir)
@@ -198,7 +214,7 @@ def main():
     # if the trained model is written into an arbitrary location.
     is_overwritten_training = logdir != restore_from
 
-    wavenet_params = loadParams(args.max_dilation_pow, args.expansion_reps);
+    wavenet_params = loadParams(args.max_dilation_pow, args.expansion_reps, args.dil_chan, args.res_chan, args.skip_chan);
         
     with open(logdir + 'wavenet_params.json', 'w') as outfile:
         json.dump(wavenet_params, outfile)
