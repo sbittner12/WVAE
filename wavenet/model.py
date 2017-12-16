@@ -402,6 +402,7 @@ class WaveNetModel(object):
 
         print('create causal layer');
         current_layer = self._create_causal_layer(current_layer)
+        exit()
 
         output_width = tf.shape(input_batch)[1] - self.receptive_field + 1
 
@@ -413,7 +414,6 @@ class WaveNetModel(object):
                     output, current_layer = self._create_dilation_layer(
                         current_layer, layer_index, dilation,
                         global_condition_batch, output_width)
-                    exit()
                     outputs.append(output)
 
         with tf.name_scope('postprocessing'):
