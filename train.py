@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+import numpy as np
 
 import tensorflow as tf
 from tensorflow.python.client import timeline
@@ -22,15 +23,15 @@ from wavenet.midi_reader import MidiReader
 from wavenet.params import loadParams
 
 BATCH_SIZE = 1
-DATA_DIRECTORY = './midi-Corpus'
+DATA_SET = 'JSB_Chorales'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 500
 NUM_STEPS = int(1e5)
 LEARNING_RATE = 1e-3
 MAX_DILATION_POW  = 7;
 EXPANSION_REPS = 3;
-DIL_CHAN = 32;
-RES_CHAN = 32;
+DIL_CHAN = 16;
+RES_CHAN = 16;
 SKIP_CHAN = 16;
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
 SAMPLE_SIZE = 100000
@@ -52,8 +53,8 @@ def get_arguments():
     parser = argparse.ArgumentParser(description='WaveNet example network')
     parser.add_argument('--batch_size', type=int, default=BATCH_SIZE,
                         help='How many wav files to process at once. Default: ' + str(BATCH_SIZE) + '.')
-    parser.add_argument('--data_dir', type=str, default=DATA_DIRECTORY,
-                        help='The directory containing the VCTK corpus.')
+    parser.add_argument('--data_set', type=str, default=DATA_SET,
+                        help='String id for Nottingham or JSB_Chorales.')
     parser.add_argument('--store_metadata', type=bool, default=METADATA,
                         help='Whether to store advanced debugging information '
                         '(execution time, memory consumption) for use with '
@@ -201,11 +202,12 @@ def validate_directories(args):
 
 def main():
     args = get_arguments()
-    logdir = 'logdir/%d_ord_RF_%d_rep_%d_dil_chan_%d_res_chan_%d_skip_chan/' % \
-             (args.max_dilation_pow, args.expansion_reps, args.dil_chan, args.res_chan, args.skip_chan);
+    data_dir = 'midi-Corpus/' + args.data_set + '/'
+    logdir = data_dir + 'max_dilation=%d_reps=%d/' % (args.max_dilation_pow, args.expansion_reps);
     print('*************************************************');
     print(logdir);
     print('*************************************************');
+    sys.stdout.flush()
     restore_from = logdir
     if not os.path.exists(logdir):
         os.makedirs(logdir)
@@ -227,8 +229,10 @@ def main():
         # Allow silence trimming to be skipped by specifying a threshold near
         # zero.
         gc_enabled = False
-        reader = MidiReader(
-            args.data_dir,
+        # data queue for the training set
+        train_dir = data_dir + 'train/';
+        train_reader = MidiReader(
+            train_dir,
             coord,
             sample_rate=wavenet_params['sample_rate'],
             gc_enabled=gc_enabled,
@@ -237,7 +241,20 @@ def main():
                                                                    wavenet_params["scalar_input"],
                                                                    wavenet_params["initial_filter_width"]),
             sample_size=args.sample_size)
-        audio_batch = reader.dequeue(args.batch_size)
+        train_batch = train_reader.dequeue(args.batch_size)
+        # data queue for the validation set
+        #valid_dir = data_dir + 'valid/';
+        #valid_reader = MidiReader(
+        #    valid_dir,
+        #    coord,
+        #    sample_rate=wavenet_params['sample_rate'],
+        #    gc_enabled=gc_enabled,
+        #    receptive_field=WaveNetModel.calculate_receptive_field(wavenet_params["filter_width"],
+        #                                                           wavenet_params["dilations"],
+        #                                                           wavenet_params["scalar_input"],
+        #                                                           wavenet_params["initial_filter_width"]),
+        #    sample_size=args.sample_size)
+        #valid_batch = valid_reader.dequeue(args.batch_size)
         if gc_enabled:
             gc_id_batch = reader.dequeue_gc(args.batch_size)
         else:
@@ -256,21 +273,30 @@ def main():
         initial_filter_width=wavenet_params["initial_filter_width"],
         histograms=False,
         global_condition_channels=None,
-        global_condition_cardinality=reader.gc_category_cardinality)
+        global_condition_cardinality=train_reader.gc_category_cardinality)
     if args.l2_regularization_strength == 0:
         args.l2_regularization_strength = None
-    loss, target_output, prediction = net.loss(input_batch=audio_batch,
+    print('constructing training loss');
+    sys.stdout.flush()
+    train_loss, target_output, prediction = net.loss(input_batch=train_batch,
+                    global_condition_batch=gc_id_batch,
+                    l2_regularization_strength=args.l2_regularization_strength)
+    print('constructing validation loss');
+    sys.stdout.flush()
+    valid_loss, target_output, prediction = net.loss(input_batch=valid_batch,
                     global_condition_batch=gc_id_batch,
                     l2_regularization_strength=args.l2_regularization_strength)
 
     print('making optimizer');
+    sys.stdout.flush()
     optimizer = optimizer_factory['adam'](
                     learning_rate=args.learning_rate,
                     momentum=args.momentum)
     trainable = tf.trainable_variables()
-    optim = optimizer.minimize(loss, var_list=trainable)
+    optim = optimizer.minimize(train_loss, var_list=trainable)
 
     print('setting up tensorboard');
+    sys.stdout.flush()
     # Set up logging for TensorBoard.
     writer = tf.summary.FileWriter(logdir)
     writer.add_graph(tf.get_default_graph())
@@ -282,6 +308,8 @@ def main():
     init = tf.global_variables_initializer()
     sess.run(init)
 
+    print('saver');
+    sys.stdout.flush()
     # Saver for storing checkpoints of the model.
     saver = tf.train.Saver(var_list=tf.trainable_variables(), max_to_keep=5)
 
@@ -298,38 +326,62 @@ def main():
               "the previous model.")
         raise
 
+    print('thread stuff');
+    sys.stdout.flush()
     threads = tf.train.start_queue_runners(sess=sess, coord=coord)
-    reader.start_threads(sess)
+    train_reader.start_threads(sess)
 
     step = None
     last_saved_step = saved_global_step
+    valid_loss_values = np.zeros((int(np.ceil(args.num_steps/50)),));
+    vl_ind = 0;
+    print('optimization time');
+    sys.stdout.flush()
     try:
         for step in range(saved_global_step + 1, args.num_steps):
             print('step', step);
+            sys.stdout.flush()
             start_time = time.time()
             if args.store_metadata and step % 50 == 0:
                 # Slow run that stores extra information for debugging.
                 print('Storing metadata')
+                sys.stdout.flush()
                 run_options = tf.RunOptions(
                     trace_level=tf.RunOptions.FULL_TRACE)
+                print('sess.run')
+                sys.stdout.flush()
                 summary, loss_value, _ = sess.run(
-                    [summaries, loss, optim],
+                    [summaries, train_loss, optim],
                     options=run_options,
                     run_metadata=run_metadata)
+                print('writing summary')
+                sys.stdout.flush()
                 writer.add_summary(summary, step)
                 writer.add_run_metadata(run_metadata,
                                         'step_{:04d}'.format(step))
+                #valid_loss_values[vl_ind] = sess.run(valid_loss);
+                #np.savez('results.npz', validation_loss=valid_loss_values);
+                #vl_ind += 1;
                 tl = timeline.Timeline(run_metadata.step_stats)
                 timeline_path = os.path.join(logdir, 'timeline.trace')
                 with open(timeline_path, 'w') as f:
                     f.write(tl.generate_chrome_trace_format(show_memory=True))
+                print('end if')
+                sys.stdout.flush()
             else:
-                summary, loss_value, _ = sess.run([summaries, loss, optim])
+                print('else', step);
+                sys.stdout.flush()
+                summary, loss_value, _ = sess.run([summaries, train_loss, optim])
+                print('1');
+                sys.stdout.flush()
                 writer.add_summary(summary, step)
+                print('2');
+                sys.stdout.flush()
 
             duration = time.time() - start_time
             print('step {:d} - loss = {:.3f}, ({:.3f} sec/step)'
                   .format(step, loss_value, duration))
+            sys.stdout.flush()
 
             if step % CHECKPOINT_EVERY == 0:
                 save(saver, sess, logdir, step)

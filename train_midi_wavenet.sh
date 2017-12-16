@@ -8,5 +8,5 @@
 
 module load cuda80/toolkit cuda80/blas cudnn/6.0_8
 
-python /rigel/stats/users/srb2201/final_project/midi-wavenet/train.py --max_dilation_pow=7 --expansion_reps=3 --dil_chan=$1 --res_chan=$2 --skip_chan=$3
+python /rigel/stats/users/srb2201/final_project/midi-wavenet/train.py --max_dilation_pow=7 --expansion_reps=3
 

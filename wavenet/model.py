@@ -400,6 +400,7 @@ class WaveNetModel(object):
         else:
             initial_channels = self.midi_dims
 
+        print('create causal layer');
         current_layer = self._create_causal_layer(current_layer)
 
         output_width = tf.shape(input_batch)[1] - self.receptive_field + 1
@@ -408,9 +409,11 @@ class WaveNetModel(object):
         with tf.name_scope('dilated_stack'):
             for layer_index, dilation in enumerate(self.dilations):
                 with tf.name_scope('layer{}'.format(layer_index)):
+                    print('create dilation layer', layer_index, dilation);
                     output, current_layer = self._create_dilation_layer(
                         current_layer, layer_index, dilation,
                         global_condition_batch, output_width)
+                    exit()
                     outputs.append(output)
 
         with tf.name_scope('postprocessing'):

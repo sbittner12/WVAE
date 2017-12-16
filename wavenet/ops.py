@@ -44,15 +44,20 @@ def batch_to_time(value, dilation, name=None):
 
 
 def causal_conv(value, filter_, dilation, name='causal_conv'):
+    print('value', value.shape);
+    print('filter', filter_.shape, 'dilation', dilation);
     with tf.name_scope(name):
         filter_width = tf.shape(filter_)[0]
         if dilation > 1:
             transformed = time_to_batch(value, dilation)
+            print('transformed', transformed.shape);
             conv = tf.nn.conv1d(transformed, filter_, stride=1,
                                 padding='VALID')
             restored = batch_to_time(conv, dilation)
+            print('restored', restored.shape);
         else:
             restored = tf.nn.conv1d(value, filter_, stride=1, padding='VALID')
+            print('restored', restored.shape);
         # Remove excess elements at the end.
         out_width = tf.shape(value)[1] - (filter_width - 1) * dilation
         result = tf.slice(restored,
