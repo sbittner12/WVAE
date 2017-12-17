@@ -19,7 +19,7 @@ import tensorflow as tf
 from tensorflow.python.client import timeline
 
 from wavenet import WaveNetModel, optimizer_factory
-from wavenet.midi_reader import MidiReader
+from wavenet.midi_reader import MidiReader, load_all_audio
 from wavenet.params import loadParams
 
 BATCH_SIZE = 1
@@ -27,9 +27,9 @@ DATA_SET = 'JSB_Chorales'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 500
 NUM_STEPS = int(1e5)
-LEARNING_RATE = 1e-3
-MAX_DILATION_POW  = 7;
-EXPANSION_REPS = 3;
+LEARNING_RATE = 1e-6
+MAX_DILATION_POW  = 4;
+EXPANSION_REPS = 1;
 DIL_CHAN = 32;
 RES_CHAN = 32;
 SKIP_CHAN = 32;
@@ -39,7 +39,7 @@ L2_REGULARIZATION_STRENGTH = 0
 EPSILON = 0.001
 MOMENTUM = 0.9
 MAX_TO_KEEP = 5
-METADATA = False
+METADATA = True
 
 
 def get_arguments():
@@ -278,7 +278,7 @@ def main():
         args.l2_regularization_strength = None
     print('constructing training loss');
     sys.stdout.flush()
-    train_loss, target_output, prediction = net.loss(input_batch=train_batch,
+    train_loss, recon_loss, latent_loss, target_output, prediction, mu_enc, layers = net.loss(input_batch=train_batch,
                     global_condition_batch=gc_id_batch,
                     l2_regularization_strength=args.l2_regularization_strength)
     print('constructing validation loss');
@@ -302,6 +302,11 @@ def main():
     writer.add_graph(tf.get_default_graph())
     run_metadata = tf.RunMetadata()
     summaries = tf.summary.merge_all()
+
+    valid_input = tf.placeholder(dtype=tf.float32, shape=(1, None, 88));
+    valid_loss, valid_recon_loss, valid_latent_loss, valid_target_output, valid_prediction, valid_mu, valid_enc_layers = net.loss(input_batch=valid_input,
+                    global_condition_batch=gc_id_batch,
+                    l2_regularization_strength=args.l2_regularization_strength)
 
     # Set up session
     sess = tf.Session(config=tf.ConfigProto(log_device_placement=False))
@@ -333,10 +338,32 @@ def main():
 
     step = None
     last_saved_step = saved_global_step
+ 
+    # load validation data
+    validation_audio = load_all_audio(data_dir + 'valid/');
+    num_valid_files = len(validation_audio);
     valid_loss_values = np.zeros((int(np.ceil(args.num_steps/50)),));
     vl_ind = 0;
+    print('figuring out wtf is going on time');
+    sys.stdout.flush()
+
+    valid_losses_step = np.zeros((num_valid_files,));
+    audio_0 = np.expand_dims(validation_audio[2], 0);
+    print('audio 0', audio_0.shape);
+    print(audio_0);
+    mu_enc_0, enc_layers_0 = sess.run([valid_mu, valid_enc_layers], {valid_input:audio_0});
+    print('layer shapes');
+    for layer in enc_layers_0:
+        print(layer.shape);
+    print('mu 0', mu_enc_0.shape);
+    print(mu_enc_0);
+    valid_loss_0 = sess.run(valid_loss, {valid_input:audio_0});
+    print('valid_loss_0', valid_loss_0);
+    #print('validation loss 0', valid_losses_step_0);
+
     print('optimization time');
     sys.stdout.flush()
+    min_valid_loss = 1e10;
     try:
         for step in range(saved_global_step + 1, args.num_steps):
             print('step', step);
@@ -348,8 +375,13 @@ def main():
                 sys.stdout.flush()
                 run_options = tf.RunOptions(
                     trace_level=tf.RunOptions.FULL_TRACE)
-                print('sess.run')
+                print('mu comp')
                 sys.stdout.flush()
+                _mu_enc = sess.run(
+                    mu_enc,
+                    options=run_options,
+                    run_metadata=run_metadata)
+                print(_mu_enc.shape);
                 summary, loss_value, _ = sess.run(
                     [summaries, train_loss, optim],
                     options=run_options,
@@ -359,24 +391,23 @@ def main():
                 writer.add_summary(summary, step)
                 writer.add_run_metadata(run_metadata,
                                         'step_{:04d}'.format(step))
-                #valid_loss_values[vl_ind] = sess.run(valid_loss);
-                #np.savez('results.npz', validation_loss=valid_loss_values);
-                #vl_ind += 1;
+                valid_losses_step = np.zeros((num_valid_files,));
+                for i in range(num_valid_files):
+                    audio_i = np.expand_dims(validation_audio[i], 0);
+                    valid_losses_step[i] = sess.run(valid_loss, {valid_input:audio_i});
+                valid_loss_value_step = np.mean(valid_losses_step);
+                valid_loss_values[vl_ind] = valid_loss_value_step
+                np.savez(logdir + 'validation.npz', validation_loss=valid_loss_values);
+                vl_ind += 1;
                 tl = timeline.Timeline(run_metadata.step_stats)
                 timeline_path = os.path.join(logdir, 'timeline.trace')
                 with open(timeline_path, 'w') as f:
                     f.write(tl.generate_chrome_trace_format(show_memory=True))
-                print('end if')
-                sys.stdout.flush()
             else:
-                print('else', step);
-                sys.stdout.flush()
+                _rec_ls, _lat_ls, _tot_ls, _pred  = sess.run([recon_loss, latent_loss, train_loss, prediction])
+                print('recon', _rec_ls, 'latent', _lat_ls, 'total', _tot_ls, 'max pred', np.max(_pred), 'min pred', np.min(_pred));
                 summary, loss_value, _ = sess.run([summaries, train_loss, optim])
-                print('1');
-                sys.stdout.flush()
                 writer.add_summary(summary, step)
-                print('2');
-                sys.stdout.flush()
 
             duration = time.time() - start_time
             print('step {:d} - loss = {:.3f}, ({:.3f} sec/step)'

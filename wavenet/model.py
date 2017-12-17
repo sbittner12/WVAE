@@ -229,14 +229,15 @@ class WaveNetModel(object):
 
         The layer can change the number of channels.
         '''
+        print('create causal layer', net_type);
         if (net_type == 'encoder'):
             weights_filter = self.enc_vars['causal_layer']['filter']
             zeropad=False;
         elif (net_type == 'decoder'):
             weights_filter = self.dec_vars['causal_layer']['filter']
             zeropad=True;
-        
         with tf.name_scope('causal_layer'):
+            print('zeropad', zeropad)
             return causal_conv(input_batch, weights_filter, 1, zeropad)
 
     def _create_dilation_layer(self, input_batch, layer_index, dilation,
@@ -294,15 +295,18 @@ class WaveNetModel(object):
         transformed = tf.nn.conv1d(
             out, weights_dense, stride=1, padding="SAME", name="dense")
 
+        out_dim1 = tf.shape(out)[1];
+
         # The 1x1 conv to produce the skip output
         if (net_type == 'encoder'):
-            skip_cut = tf.shape(out)[1] - output_width
+            skip_cut = out_dim1 - output_width
             out_skip = tf.slice(out, [0, skip_cut, 0], [-1, -1, -1])
         elif (net_type == 'decoder'):
             skip_add = output_width - tf.shape(out)[1]
+            delta = np.mod(skip_add, 2);
             out_dim0 = tf.shape(out)[0];
             out_dim2 = tf.shape(out)[2];
-            out_skip = tf.concat((tf.zeros((out_dim0, skip_add//2, out_dim2)), out), axis=1);
+            out_skip = tf.concat((tf.zeros((out_dim0, skip_add//2+delta, out_dim2)), out), axis=1);
             out_skip = tf.concat((out_skip, tf.zeros((out_dim0, skip_add//2, out_dim2))), axis=1);
         weights_skip = variables['skip']
         skip_contribution = tf.nn.conv1d(
@@ -330,13 +334,17 @@ class WaveNetModel(object):
             input_cut = tf.shape(input_batch)[1] - tf.shape(transformed)[1]
             input_batch = tf.slice(input_batch, [0, input_cut, 0], [-1, -1, -1])
         elif (net_type == 'decoder'):
-            input_add = dilation;
             input_dim0 = tf.shape(input_batch)[0];
+            input_dim1 = tf.shape(input_batch)[1];
             input_dim2 = tf.shape(input_batch)[2];
-            input_batch = tf.concat((tf.zeros((input_dim0, input_add//2, input_dim2)), input_batch), axis=1);
+            input_add = out_dim1-input_dim1;
+            delta = np.mod(input_add, 2);
+            input_batch = tf.concat((tf.zeros((input_dim0, input_add//2 + delta, input_dim2)), input_batch), axis=1);
             input_batch = tf.concat((input_batch, tf.zeros((input_dim0, input_add//2, input_dim2))), axis=1);
+         
+        residual_output = input_batch + transformed
 
-        return skip_contribution, input_batch + transformed
+        return skip_contribution, residual_output
 
     def _generator_conv(self, input_batch, state_batch, weights):
         '''Perform convolution for a single convolutional processing step.'''
@@ -398,6 +406,7 @@ class WaveNetModel(object):
     def _create_encoder(self, input_batch, global_condition_batch):
         '''Construct the WaveNet encoder network.'''
         outputs = []
+        layers = []
         current_layer = input_batch
 
         # Pre-process the input with a regular convolution
@@ -407,8 +416,8 @@ class WaveNetModel(object):
             initial_channels = self.midi_dims
 
         print('create causal layer');
-        current_layer = self._create_causal_layer(current_layer)
-
+        current_layer = self._create_causal_layer(current_layer, net_type='encoder')
+        layers.append(current_layer);
         output_width = tf.shape(input_batch)[1] - self.receptive_field + 1
 
         # Add all defined dilation layers.
@@ -418,8 +427,9 @@ class WaveNetModel(object):
                     print('create dilation layer', layer_index, dilation);
                     output, current_layer = self._create_dilation_layer(
                         current_layer, layer_index, dilation,
-                        output_width)
+                        output_width, net_type='encoder')
                     outputs.append(output)
+                    layers.append(current_layer);
 
         with tf.name_scope('postprocessing'):
             # Perform (+) -> ReLU -> 1x1 conv -> ReLU -> 1x1 conv to
@@ -451,7 +461,7 @@ class WaveNetModel(object):
 
         mu = conv2[:,:,:self.residual_channels]
         sigma = conv2[:,:,self.residual_channels:]
-        return mu, sigma
+        return mu, sigma, layers
 
 
     def _create_decoder(self, z, output_width):
@@ -702,7 +712,7 @@ class WaveNetModel(object):
             network_input = tf.slice(network_input, [0, 0, 0],
                                      [-1, network_input_width, -1])
             with tf.name_scope('encoder'):
-                mu, log_sigma_sq = self._create_encoder(network_input, gc_embedding)
+                mu_enc, log_sigma_sq, enc_layers = self._create_encoder(network_input, gc_embedding)
                 print('made encoder');
 
             
@@ -720,34 +730,35 @@ class WaveNetModel(object):
             with tf.name_scope('loss'):
                 # Cut off the samples corresponding to the receptive field
                 # for the first predicted sample.
-                target_output = tf.slice(
-                    tf.reshape(
-                        input_batch,
-                        [self.batch_size, -1, self.midi_dims]),
-                    [0, self.receptive_field, 0],
-                    [-1, -1, -1])
-                target_output = tf.reshape(target_output,
+                #target_output = tf.slice(
+                #    tf.reshape(
+                #        input_batch,
+                #        [self.batch_size, -1, self.midi_dims]),
+                #    [0, self.receptive_field, 0],
+                #    [-1, -1, -1])
+                target_output = tf.reshape(network_input,
                                            [-1, self.midi_dims])
-                prediction = tf.reshape(tf.nn.sigmoid(raw_output),
-                                        [-1, self.midi_dims])
+                prediction = tf.reshape(raw_output, [-1, self.midi_dims])
                 #loss = tf.reduce_sum(tf.square(target_output-prediction), axis=1);
                 #reduced_loss = tf.reduce_mean(loss)
 
                 # Prediction \in (0,1)
-                recon_loss = target_output * tf.log(1e-10 + prediction) + (1 - target_output) * tf.log(1e-10+1- prediction)
+                recon_loss = tf.reduce_mean(target_output * tf.log(1e-10 + prediction) + (1 - target_output) * tf.log(1e-10+1- prediction))
 
                 sigma_sq = tf.exp(log_sigma_sq)
-                latent_loss = -.5 * tf.reduce_mean(tf.reduce_sum((1 + tf.log(1e-10 + sigma_sq)) - tf.square(mu) - sigma_sq, axis=[1,2]),axis=0)
+                latent_loss = -.5 * tf.reduce_mean((1 + tf.log(1e-10 + sigma_sq)) - tf.square(mu_enc) - sigma_sq);
                 
                 total_loss = recon_loss + latent_loss
 
 
-                print('made loss');
+                print('made loss', total_loss);
 
-                tf.summary.scalar('loss', reduced_loss)
+                tf.summary.scalar('recon_loss', recon_loss)
+                tf.summary.scalar('latent_loss', latent_loss)
+                tf.summary.scalar('total_loss', total_loss)
 
                 if l2_regularization_strength is None:
-                    return reduced_loss, target_output, prediction
+                    return total_loss, recon_loss, latent_loss, target_output, prediction, mu_enc, enc_layers
                 else:
                     # L2 regularization for all trainable parameters
                     l2_loss = tf.add_n([tf.nn.l2_loss(v)
@@ -755,10 +766,7 @@ class WaveNetModel(object):
                                         if not('bias' in v.name)])
 
                     # Add the regularization term to the loss
-                    total_loss = (reduced_loss +
+                    total_loss = (total_loss +
                                   l2_regularization_strength * l2_loss)
 
-                    tf.summary.scalar('l2_loss', l2_loss)
-                    tf.summary.scalar('total_loss', total_loss)
-
-                    return total_loss, target_output, prediction
+                    return total_loss, recon_loss, latent_loss, target_output, prediction, mu_enc, enc_layers

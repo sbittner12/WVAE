@@ -45,6 +45,7 @@ def batch_to_time(value, dilation, name=None):
 
 def causal_conv(value, filter_, dilation, zeropad=False, name='causal_conv'):
     if (zeropad):
+        value_dim1 = tf.shape(value)[1];
         padding = 'SAME';
     else:
         padding = 'VALID';
@@ -54,15 +55,20 @@ def causal_conv(value, filter_, dilation, zeropad=False, name='causal_conv'):
         if dilation > 1:
             transformed = time_to_batch(value, dilation)
             if (zeropad):
-                transformed = tf.concat((tf.zeros((filter_width, 1, filter_in_chan)), transformed), axis=1);
-            conv = tf.nn.conv1d(transformed, filter_, stride=1,
-                                padding=padding)
+                transformed = tf.concat((tf.zeros((tf.shape(transformed)[0], 1, filter_in_chan)), transformed), axis=1);
+            conv = tf.nn.conv1d(transformed, filter_, stride=1, padding=padding);
             restored = batch_to_time(conv, dilation)
         else:
-            value = tf.concat((tf.zeros((tf.shape(value)[0], 1, filter_in_chan)), value), axis=1);
+            if (zeropad):
+                value = tf.concat((tf.zeros((tf.shape(value)[0], 1, filter_in_chan)), value), axis=1);
             restored = tf.nn.conv1d(value, filter_, stride=1, padding=padding)
         # Remove excess elements at the end.
-        if (not zeropad):
+        if zeropad:
+            out_width = value_dim1 + (filter_width - 1) * dilation
+            restored = tf.slice(restored,
+                              [0, 0, 0],
+                              [-1, out_width, -1])
+        else:
             out_width = tf.shape(value)[1] - (filter_width - 1) * dilation
             restored = tf.slice(restored,
                               [0, 0, 0],

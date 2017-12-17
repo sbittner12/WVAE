@@ -65,6 +65,16 @@ def load_generic_audio(directory):
         # audio is (T x 88);
         yield audio, filename, category_id
 
+def load_all_audio(directory):
+    '''Generator that yields audio waveforms from the directory.'''
+    files = find_files(directory)
+    audio_list = []
+    for filename in files:
+        midifile = midiread(filename);
+        audio  = midifile.piano_roll;
+        audio_list.append(audio);
+    return audio_list;
+
 
 def trim_silence(audio):
     '''Removes silence at the beginning and end of a sample.'''
