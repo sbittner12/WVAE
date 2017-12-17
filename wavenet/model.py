@@ -501,7 +501,7 @@ class WaveNetModel(object):
             conv2 = tf.nn.conv1d(transformed2, w2, stride=1, padding="SAME")
             if self.use_biases:
                 conv2 = tf.add(conv2, b2)
-        return conv2
+        return tf.nn.sigmoid(conv2)
 
     def _create_generator(self, input_batch, global_condition_batch):
         '''Construct an efficient incremental generator.'''
@@ -702,10 +702,15 @@ class WaveNetModel(object):
             network_input = tf.slice(network_input, [0, 0, 0],
                                      [-1, network_input_width, -1])
             with tf.name_scope('encoder'):
-                mu, sigma = self._create_encoder(network_input, gc_embedding)
+                mu, log_sigma_sq = self._create_encoder(network_input, gc_embedding)
                 print('made encoder');
 
-            z = tf.placeholder(dtype=tf.float32, shape=mu.shape);
+            
+
+            #z = tf.placeholder(dtype=tf.float32, shape=mu.shape);
+            eps = tf.random_normal(tf.shape(log_sigma_sq))
+            z = mu_enc + tf.sqrt(tf.exp(log_sigma_sq)) * eps
+
 
 
             with tf.name_scope('decoder'):
@@ -725,8 +730,18 @@ class WaveNetModel(object):
                                            [-1, self.midi_dims])
                 prediction = tf.reshape(tf.nn.sigmoid(raw_output),
                                         [-1, self.midi_dims])
-                loss = tf.reduce_sum(tf.square(target_output-prediction), axis=1);
-                reduced_loss = tf.reduce_mean(loss)
+                #loss = tf.reduce_sum(tf.square(target_output-prediction), axis=1);
+                #reduced_loss = tf.reduce_mean(loss)
+
+                # Prediction \in (0,1)
+                recon_loss = target_output * tf.log(1e-10 + prediction) + (1 - target_output) * tf.log(1e-10+1- prediction)
+
+                sigma_sq = tf.exp(log_sigma_sq)
+                latent_loss = -.5 * tf.reduce_mean(tf.reduce_sum((1 + tf.log(1e-10 + sigma_sq)) - tf.square(mu) - sigma_sq, axis=[1,2]),axis=0)
+                
+                total_loss = recon_loss + latent_loss
+
+
                 print('made loss');
 
                 tf.summary.scalar('loss', reduced_loss)
