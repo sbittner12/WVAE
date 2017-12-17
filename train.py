@@ -283,9 +283,9 @@ def main():
                     l2_regularization_strength=args.l2_regularization_strength)
     print('constructing validation loss');
     sys.stdout.flush()
-    valid_loss, target_output, prediction = net.loss(input_batch=valid_batch,
-                    global_condition_batch=gc_id_batch,
-                    l2_regularization_strength=args.l2_regularization_strength)
+    #valid_loss, target_output, prediction = net.loss(input_batch=valid_batch,
+    #                global_condition_batch=gc_id_batch,
+    #                l2_regularization_strength=args.l2_regularization_strength)
 
     print('making optimizer');
     sys.stdout.flush()

@@ -109,7 +109,7 @@ class WaveNetModel(object):
         self.receptive_field = WaveNetModel.calculate_receptive_field(
             self.filter_width, self.dilations, self.scalar_input,
             self.initial_filter_width)
-        self.variables = self._create_variables()
+        self.enc_vars, self.dec_vars = self._create_variables()
 
     @staticmethod
     def calculate_receptive_field(filter_width, dilations, scalar_input,
@@ -126,121 +126,121 @@ class WaveNetModel(object):
         This allows us to share them between multiple calls to the loss
         function and generation function.'''
 
-        var = dict()
-
-        with tf.variable_scope('wavenet'):
-            if self.global_condition_cardinality is not None:
-                # We only look up the embedding if we are conditioning on a
-                # set of mutually-exclusive categories. We can also condition
-                # on an already-embedded dense vector, in which case it's
-                # given to us and we don't need to do the embedding lookup.
-                # Still another alternative is no global condition at all, in
-                # which case we also don't do a tf.nn.embedding_lookup.
-                with tf.variable_scope('embeddings'):
+        var_list = [dict(), dict()];
+        var_scopes = ['encoder_wavenet', 'decoder_wavenet'];
+        for i in range(len(var_list)):
+            var = var_list[i];
+            var_scope = var_scopes[i];
+            with tf.variable_scope(var_scope):
+                with tf.variable_scope('causal_layer'):
                     layer = dict()
-                    layer['gc_embedding'] = create_embedding_table(
-                        'gc_embedding',
-                        [self.global_condition_cardinality,
-                         self.global_condition_channels])
-                    var['embeddings'] = layer
+                    if self.scalar_input:
+                        initial_channels = 1
+                        initial_filter_width = self.initial_filter_width
+                    else:
+                        if (var_scope == 'encoder_wavenet'):
+                            initial_channels = self.midi_dims
+                        else:
+                            initial_channels = self.residual_channels
+                        initial_filter_width = self.filter_width
+                    layer['filter'] = create_variable(
+                        'filter',
+                        [initial_filter_width,
+                         initial_channels,
+                         self.residual_channels])
+                    var['causal_layer'] = layer
 
-            with tf.variable_scope('causal_layer'):
-                layer = dict()
-                if self.scalar_input:
-                    initial_channels = 1
-                    initial_filter_width = self.initial_filter_width
-                else:
-                    initial_channels = self.midi_dims
-                    initial_filter_width = self.filter_width
-                layer['filter'] = create_variable(
-                    'filter',
-                    [initial_filter_width,
-                     initial_channels,
-                     self.residual_channels])
-                var['causal_layer'] = layer
-
-            var['dilated_stack'] = list()
-            with tf.variable_scope('dilated_stack'):
-                for i, dilation in enumerate(self.dilations):
-                    with tf.variable_scope('layer{}'.format(i)):
-                        current = dict()
-                        current['filter'] = create_variable(
-                            'filter',
-                            [self.filter_width,
-                             self.residual_channels,
-                             self.dilation_channels])
-                        current['gate'] = create_variable(
-                            'gate',
-                            [self.filter_width,
-                             self.residual_channels,
-                             self.dilation_channels])
-                        current['dense'] = create_variable(
-                            'dense',
-                            [1,
-                             self.dilation_channels,
-                             self.residual_channels])
-                        current['skip'] = create_variable(
-                            'skip',
-                            [1,
-                             self.dilation_channels,
-                             self.skip_channels])
-
-                        if self.global_condition_channels is not None:
-                            current['gc_gateweights'] = create_variable(
-                                'gc_gate',
-                                [1, self.global_condition_channels,
+                var['dilated_stack'] = list()
+                with tf.variable_scope('dilated_stack'):
+                    for i, dilation in enumerate(self.dilations):
+                        with tf.variable_scope('layer{}'.format(i)):
+                            current = dict()
+                            current['filter'] = create_variable(
+                                'filter',
+                                [self.filter_width,
+                                 self.residual_channels,
                                  self.dilation_channels])
-                            current['gc_filtweights'] = create_variable(
-                                'gc_filter',
-                                [1, self.global_condition_channels,
+                            current['gate'] = create_variable(
+                                'gate',
+                                [self.filter_width,
+                                 self.residual_channels,
                                  self.dilation_channels])
+                            current['dense'] = create_variable(
+                                'dense',
+                                [1,
+                                 self.dilation_channels,
+                                 self.residual_channels])
+                            current['skip'] = create_variable(
+                                'skip',
+                                [1,
+                                 self.dilation_channels,
+                                 self.skip_channels])
+                            if self.global_condition_channels is not None:
+                                current['gc_gateweights'] = create_variable(
+                                    'gc_gate',
+                                    [1, self.global_condition_channels,
+                                     self.dilation_channels])
+                                current['gc_filtweights'] = create_variable(
+                                    'gc_filter',
+                                    [1, self.global_condition_channels,
+                                     self.dilation_channels])
 
-                        if self.use_biases:
-                            current['filter_bias'] = create_bias_variable(
-                                'filter_bias',
-                                [self.dilation_channels])
-                            current['gate_bias'] = create_bias_variable(
-                                'gate_bias',
-                                [self.dilation_channels])
-                            current['dense_bias'] = create_bias_variable(
-                                'dense_bias',
-                                [self.residual_channels])
-                            current['skip_bias'] = create_bias_variable(
-                                'slip_bias',
-                                [self.skip_channels])
+                            if self.use_biases:
+                                current['filter_bias'] = create_bias_variable(
+                                    'filter_bias',
+                                    [self.dilation_channels])
+                                current['gate_bias'] = create_bias_variable(
+                                    'gate_bias',
+                                    [self.dilation_channels])
+                                current['dense_bias'] = create_bias_variable(
+                                    'dense_bias',
+                                    [self.residual_channels])
+                                current['skip_bias'] = create_bias_variable(
+                                   'skip_bias',
+                                   [self.skip_channels])
 
-                        var['dilated_stack'].append(current)
+                            var['dilated_stack'].append(current)
 
-            with tf.variable_scope('postprocessing'):
-                current = dict()
-                current['postprocess1'] = create_variable(
-                    'postprocess1',
-                    [1, self.skip_channels, self.skip_channels])
-                current['postprocess2'] = create_variable(
-                    'postprocess2',
-                    [1, self.skip_channels, self.midi_dims])
-                if self.use_biases:
-                    current['postprocess1_bias'] = create_bias_variable(
-                        'postprocess1_bias',
-                        [self.skip_channels])
-                    current['postprocess2_bias'] = create_bias_variable(
-                        'postprocess2_bias',
-                        [self.midi_dims])
-                var['postprocessing'] = current
+                with tf.variable_scope('postprocessing'):
+                    if (var_scope == 'encoder_wavenet'):
+                        output_channels = 2*self.residual_channels;
+                    else:
+                        output_channels = self.midi_dims;
+                    current = dict()
+                    current['postprocess1'] = create_variable(
+                        'postprocess1',
+                        [1, self.skip_channels, self.skip_channels])
+                    current['postprocess2'] = create_variable(
+                        'postprocess2',
+                        [1, self.skip_channels, output_channels])
+                    if self.use_biases:
+                        current['postprocess1_bias'] = create_bias_variable(
+                            'postprocess1_bias',
+                            [self.skip_channels])
+                        current['postprocess2_bias'] = create_bias_variable(
+                            'postprocess2_bias',
+                            [output_channels])
+                    var['postprocessing'] = current
 
-        return var
+        return var_list
 
-    def _create_causal_layer(self, input_batch):
+    def _create_causal_layer(self, input_batch, net_type='encoder'):
         '''Creates a single causal convolution layer.
 
         The layer can change the number of channels.
         '''
+        if (net_type == 'encoder'):
+            weights_filter = self.enc_vars['causal_layer']['filter']
+            zeropad=False;
+        elif (net_type == 'decoder'):
+            weights_filter = self.dec_vars['causal_layer']['filter']
+            zeropad=True;
+        
         with tf.name_scope('causal_layer'):
-            weights_filter = self.variables['causal_layer']['filter']
-            return causal_conv(input_batch, weights_filter, 1)
+            return causal_conv(input_batch, weights_filter, 1, zeropad)
 
     def _create_dilation_layer(self, input_batch, layer_index, dilation,
-                               global_condition_batch, output_width):
+                               output_width, net_type='encoder'):
         '''Creates a single causal dilated convolution layer.
 
         Args:
@@ -267,27 +267,19 @@ class WaveNetModel(object):
         are omitted due to the limits of ASCII art.
 
         '''
-        variables = self.variables['dilated_stack'][layer_index]
+        if (net_type == 'encoder'):
+            variables = self.enc_vars['dilated_stack'][layer_index]
+            zeropad=False;
+        elif (net_type == 'decoder'):
+            variables = self.dec_vars['dilated_stack'][layer_index]
+            zeropad=True;
+
 
         weights_filter = variables['filter']
         weights_gate = variables['gate']
 
-        conv_filter = causal_conv(input_batch, weights_filter, dilation)
-        conv_gate = causal_conv(input_batch, weights_gate, dilation)
-
-        if global_condition_batch is not None:
-            weights_gc_filter = variables['gc_filtweights']
-            conv_filter = conv_filter + tf.nn.conv1d(global_condition_batch,
-                                                     weights_gc_filter,
-                                                     stride=1,
-                                                     padding="SAME",
-                                                     name="gc_filter")
-            weights_gc_gate = variables['gc_gateweights']
-            conv_gate = conv_gate + tf.nn.conv1d(global_condition_batch,
-                                                 weights_gc_gate,
-                                                 stride=1,
-                                                 padding="SAME",
-                                                 name="gc_gate")
+        conv_filter = causal_conv(input_batch, weights_filter, dilation, zeropad=zeropad)
+        conv_gate = causal_conv(input_batch, weights_gate, dilation, zeropad=zeropad)
 
         if self.use_biases:
             filter_bias = variables['filter_bias']
@@ -303,8 +295,15 @@ class WaveNetModel(object):
             out, weights_dense, stride=1, padding="SAME", name="dense")
 
         # The 1x1 conv to produce the skip output
-        skip_cut = tf.shape(out)[1] - output_width
-        out_skip = tf.slice(out, [0, skip_cut, 0], [-1, -1, -1])
+        if (net_type == 'encoder'):
+            skip_cut = tf.shape(out)[1] - output_width
+            out_skip = tf.slice(out, [0, skip_cut, 0], [-1, -1, -1])
+        elif (net_type == 'decoder'):
+            skip_add = output_width - tf.shape(out)[1]
+            out_dim0 = tf.shape(out)[0];
+            out_dim2 = tf.shape(out)[2];
+            out_skip = tf.concat((tf.zeros((out_dim0, skip_add//2, out_dim2)), out), axis=1);
+            out_skip = tf.concat((out_skip, tf.zeros((out_dim0, skip_add//2, out_dim2))), axis=1);
         weights_skip = variables['skip']
         skip_contribution = tf.nn.conv1d(
             out_skip, weights_skip, stride=1, padding="SAME", name="skip")
@@ -327,8 +326,15 @@ class WaveNetModel(object):
                 tf.histogram_summary(layer + '_biases_dense', dense_bias)
                 tf.histogram_summary(layer + '_biases_skip', skip_bias)
 
-        input_cut = tf.shape(input_batch)[1] - tf.shape(transformed)[1]
-        input_batch = tf.slice(input_batch, [0, input_cut, 0], [-1, -1, -1])
+        if (net_type == 'encoder'):
+            input_cut = tf.shape(input_batch)[1] - tf.shape(transformed)[1]
+            input_batch = tf.slice(input_batch, [0, input_cut, 0], [-1, -1, -1])
+        elif (net_type == 'decoder'):
+            input_add = dilation;
+            input_dim0 = tf.shape(input_batch)[0];
+            input_dim2 = tf.shape(input_batch)[2];
+            input_batch = tf.concat((tf.zeros((input_dim0, input_add//2, input_dim2)), input_batch), axis=1);
+            input_batch = tf.concat((input_batch, tf.zeros((input_dim0, input_add//2, input_dim2))), axis=1);
 
         return skip_contribution, input_batch + transformed
 
@@ -389,8 +395,8 @@ class WaveNetModel(object):
 
         return skip_contribution, input_batch + transformed
 
-    def _create_network(self, input_batch, global_condition_batch):
-        '''Construct the WaveNet network.'''
+    def _create_encoder(self, input_batch, global_condition_batch):
+        '''Construct the WaveNet encoder network.'''
         outputs = []
         current_layer = input_batch
 
@@ -402,7 +408,6 @@ class WaveNetModel(object):
 
         print('create causal layer');
         current_layer = self._create_causal_layer(current_layer)
-        exit()
 
         output_width = tf.shape(input_batch)[1] - self.receptive_field + 1
 
@@ -413,24 +418,24 @@ class WaveNetModel(object):
                     print('create dilation layer', layer_index, dilation);
                     output, current_layer = self._create_dilation_layer(
                         current_layer, layer_index, dilation,
-                        global_condition_batch, output_width)
+                        output_width)
                     outputs.append(output)
 
         with tf.name_scope('postprocessing'):
             # Perform (+) -> ReLU -> 1x1 conv -> ReLU -> 1x1 conv to
             # postprocess the output.
-            w1 = self.variables['postprocessing']['postprocess1']
-            w2 = self.variables['postprocessing']['postprocess2']
+            w1 = self.enc_vars['postprocessing']['postprocess1']
+            w2 = self.enc_vars['postprocessing']['postprocess2']
             if self.use_biases:
-                b1 = self.variables['postprocessing']['postprocess1_bias']
-                b2 = self.variables['postprocessing']['postprocess2_bias']
+                b1 = self.enc_vars['postprocessing']['postprocess1_bias']
+                b2 = self.enc_vars['postprocessing']['postprocess2_bias']
 
             if self.histograms:
-                tf.histogram_summary('postprocess1_weights', w1)
-                tf.histogram_summary('postprocess2_weights', w2)
+                tf.histogram_summary('enc_postprocess1_weights', w1)
+                tf.histogram_summary('enc_postprocess2_weights', w2)
                 if self.use_biases:
-                    tf.histogram_summary('postprocess1_biases', b1)
-                    tf.histogram_summary('postprocess2_biases', b2)
+                    tf.histogram_summary('enc_postprocess1_biases', b1)
+                    tf.histogram_summary('enc_postprocess2_biases', b2)
 
             # We skip connections from the outputs of each layer, adding them
             # all up here.
@@ -444,6 +449,58 @@ class WaveNetModel(object):
             if self.use_biases:
                 conv2 = tf.add(conv2, b2)
 
+        mu = conv2[:,:,:self.residual_channels]
+        sigma = conv2[:,:,self.residual_channels:]
+        return mu, sigma
+
+
+    def _create_decoder(self, z, output_width):
+        '''Construct the WaveNet decoder network.'''
+        outputs = []
+        current_layer = z
+
+        # Pre-process the input with a regular convolution
+        initial_channels = self.midi_dims
+
+        current_layer = self._create_causal_layer(current_layer, net_type='decoder')
+
+        # Add all defined dilation layers.
+        with tf.name_scope('dilated_stack'):
+            for layer_index, dilation in enumerate(self.dilations):
+                with tf.name_scope('layer{}'.format(layer_index)):
+                    print('create dilation layer', layer_index, dilation);
+                    output, current_layer = self._create_dilation_layer(
+                        current_layer, layer_index, dilation,
+                        output_width, net_type='decoder')
+                    outputs.append(output)
+
+        with tf.name_scope('postprocessing'):
+            # Perform (+) -> ReLU -> 1x1 conv -> ReLU -> 1x1 conv to
+            # postprocess the output.
+            w1 = self.dec_vars['postprocessing']['postprocess1']
+            w2 = self.dec_vars['postprocessing']['postprocess2']
+            if self.use_biases:
+                b1 = self.dec_vars['postprocessing']['postprocess1_bias']
+                b2 = self.dec_vars['postprocessing']['postprocess2_bias']
+
+            if self.histograms:
+                tf.histogram_summary('dec_postprocess1_weights', w1)
+                tf.histogram_summary('dec_postprocess2_weights', w2)
+                if self.use_biases:
+                    tf.histogram_summary('dec_postprocess1_biases', b1)
+                    tf.histogram_summary('dec_postprocess2_biases', b2)
+
+            # We skip connections from the outputs of each layer, adding them
+            # all up here.
+            total = sum(outputs)
+            transformed1 = tf.nn.relu(total)
+            conv1 = tf.nn.conv1d(transformed1, w1, stride=1, padding="SAME")
+            if self.use_biases:
+                conv1 = tf.add(conv1, b1)
+            transformed2 = tf.nn.relu(conv1)
+            conv2 = tf.nn.conv1d(transformed2, w2, stride=1, padding="SAME")
+            if self.use_biases:
+                conv2 = tf.add(conv2, b2)
         return conv2
 
     def _create_generator(self, input_batch, global_condition_batch):
@@ -585,7 +642,7 @@ class WaveNetModel(object):
                 encoded = waveform
 
             gc_embedding = self._embed_gc(global_condition)
-            raw_output = self._create_network(encoded, gc_embedding)
+            raw_output = self._create_encoder(encoded, gc_embedding)
             out = tf.reshape(raw_output, [-1, self.midi_dims])
             # Cast to float64 to avoid bug in TensorFlow
             proba = tf.cast(
@@ -644,8 +701,17 @@ class WaveNetModel(object):
             network_input_width = tf.shape(network_input)[1] - 1
             network_input = tf.slice(network_input, [0, 0, 0],
                                      [-1, network_input_width, -1])
+            with tf.name_scope('encoder'):
+                mu, sigma = self._create_encoder(network_input, gc_embedding)
+                print('made encoder');
 
-            raw_output = self._create_network(network_input, gc_embedding)
+            z = tf.placeholder(dtype=tf.float32, shape=mu.shape);
+
+
+            with tf.name_scope('decoder'):
+                raw_output = self._create_decoder(z, network_input_width)
+
+
             with tf.name_scope('loss'):
                 # Cut off the samples corresponding to the receptive field
                 # for the first predicted sample.
@@ -661,6 +727,7 @@ class WaveNetModel(object):
                                         [-1, self.midi_dims])
                 loss = tf.reduce_sum(tf.square(target_output-prediction), axis=1);
                 reduced_loss = tf.reduce_mean(loss)
+                print('made loss');
 
                 tf.summary.scalar('loss', reduced_loss)
 

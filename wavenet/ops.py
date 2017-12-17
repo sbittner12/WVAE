@@ -43,27 +43,31 @@ def batch_to_time(value, dilation, name=None):
                           [tf.div(shape[0], dilation), -1, shape[2]])
 
 
-def causal_conv(value, filter_, dilation, name='causal_conv'):
-    print('value', value.shape);
-    print('filter', filter_.shape, 'dilation', dilation);
+def causal_conv(value, filter_, dilation, zeropad=False, name='causal_conv'):
+    if (zeropad):
+        padding = 'SAME';
+    else:
+        padding = 'VALID';
     with tf.name_scope(name):
         filter_width = tf.shape(filter_)[0]
+        filter_in_chan = tf.shape(filter_)[1]
         if dilation > 1:
             transformed = time_to_batch(value, dilation)
-            print('transformed', transformed.shape);
+            if (zeropad):
+                transformed = tf.concat((tf.zeros((filter_width, 1, filter_in_chan)), transformed), axis=1);
             conv = tf.nn.conv1d(transformed, filter_, stride=1,
-                                padding='VALID')
+                                padding=padding)
             restored = batch_to_time(conv, dilation)
-            print('restored', restored.shape);
         else:
-            restored = tf.nn.conv1d(value, filter_, stride=1, padding='VALID')
-            print('restored', restored.shape);
+            value = tf.concat((tf.zeros((tf.shape(value)[0], 1, filter_in_chan)), value), axis=1);
+            restored = tf.nn.conv1d(value, filter_, stride=1, padding=padding)
         # Remove excess elements at the end.
-        out_width = tf.shape(value)[1] - (filter_width - 1) * dilation
-        result = tf.slice(restored,
-                          [0, 0, 0],
-                          [-1, out_width, -1])
-        return result
+        if (not zeropad):
+            out_width = tf.shape(value)[1] - (filter_width - 1) * dilation
+            restored = tf.slice(restored,
+                              [0, 0, 0],
+                              [-1, out_width, -1])
+        return restored
 
 
 def mu_law_encode(audio, quantization_channels):
