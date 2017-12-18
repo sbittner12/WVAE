@@ -743,7 +743,8 @@ class WaveNetModel(object):
                 #reduced_loss = tf.reduce_mean(loss)
 
                 # Prediction \in (0,1)
-                recon_loss = tf.reduce_mean(target_output * tf.log(1e-10 + prediction) + (1 - target_output) * tf.log(1e-10+1- prediction))
+                #recon_loss = tf.reduce_mean(target_output * tf.log(1e-10 + prediction) + (1 - target_output) * tf.log(1e-10+1- prediction))
+                recon_loss = tf.reduce_mean(tf.reduce_sum(tf.square(target_output-prediction), axis=1));
 
                 sigma_sq = tf.exp(log_sigma_sq)
                 latent_loss = -.5 * tf.reduce_mean((1 + tf.log(1e-10 + sigma_sq)) - tf.square(mu_enc) - sigma_sq);

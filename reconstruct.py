@@ -275,7 +275,6 @@ def main():
     sess = tf.Session(config=tf.ConfigProto(log_device_placement=False))
     init = tf.global_variables_initializer()
     sess.run(init)
-
     print('saver');
     sys.stdout.flush()
     # Saver for storing checkpoints of the model.
@@ -319,8 +318,9 @@ def main():
     plt.title('prediction')
     fig.colorbar(h);
     fig.add_subplot(2,2,4);
-    h = plt.imshow((_target-_pred).T);
-    plt.title('delta')
+    recon = 1*(_pred  > .5);
+    h = plt.imshow(recon.T);
+    plt.title('thresholding at 0.5')
     fig.colorbar(h);
     plt.show();
     print('reconstruction');
