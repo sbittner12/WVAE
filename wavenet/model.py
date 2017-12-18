@@ -758,7 +758,7 @@ class WaveNetModel(object):
                 tf.summary.scalar('total_loss', total_loss)
 
                 if l2_regularization_strength is None:
-                    return total_loss, recon_loss, latent_loss, target_output, prediction, mu_enc, enc_layers
+                    return total_loss, recon_loss, latent_loss, target_output, prediction, mu_enc, log_sigma_sq
                 else:
                     # L2 regularization for all trainable parameters
                     l2_loss = tf.add_n([tf.nn.l2_loss(v)
@@ -769,4 +769,29 @@ class WaveNetModel(object):
                     total_loss = (total_loss +
                                   l2_regularization_strength * l2_loss)
 
-                    return total_loss, recon_loss, latent_loss, target_output, prediction, mu_enc, enc_layers
+                    return total_loss, recon_loss, latent_loss, target_output, prediction, mu_enc, log_sigma_sq
+
+
+
+    def sample(self,
+             mu,
+             log_sigma_sq,
+             network_input_width,
+             name='wavenet'):
+        '''Creates a WaveNet network and returns the autoencoding loss.
+
+        The variables are all scoped to the given name.
+        '''
+        with tf.name_scope(name):
+            # We mu-law encode and quantize the input audioform.
+            eps = tf.random_normal(tf.shape(log_sigma_sq))
+            z = mu + tf.sqrt(tf.exp(log_sigma_sq)) * eps
+
+
+
+            with tf.name_scope('decoder'):
+                raw_output = self._create_decoder(z, network_input_width)
+
+        return raw_output
+
+
