@@ -342,7 +342,7 @@ def main():
     # load validation data
     validation_audio = load_all_audio(data_dir + 'valid/');
     num_valid_files = len(validation_audio);
-    valid_loss_values = np.zeros((int(np.ceil(args.num_steps/50)),));
+    valid_loss_values = np.zeros((int(np.ceil(args.num_steps/500)),));
     vl_ind = 0;
     print('figuring out wtf is going on time');
     sys.stdout.flush()
@@ -369,7 +369,7 @@ def main():
             print('step', step);
             sys.stdout.flush()
             start_time = time.time()
-            if args.store_metadata and step % 50 == 0:
+            if args.store_metadata and step % 500 == 0:
                 # Slow run that stores extra information for debugging.
                 print('Storing metadata')
                 sys.stdout.flush()
@@ -403,6 +403,11 @@ def main():
                 timeline_path = os.path.join(logdir, 'timeline.trace')
                 with open(timeline_path, 'w') as f:
                     f.write(tl.generate_chrome_trace_format(show_memory=True))
+
+                if (valid_loss_value_step < min_valid_loss and (not np.isnan(valid_loss_value_step))):
+                    min_valid_loss = valid_loss_value_step;
+                    save(saver, sess, logdir, step)
+                    last_saved_step = step
             else:
                 _rec_ls, _lat_ls, _tot_ls, _pred  = sess.run([recon_loss, latent_loss, train_loss, prediction])
                 print('recon', _rec_ls, 'latent', _lat_ls, 'total', _tot_ls, 'max pred', np.max(_pred), 'min pred', np.min(_pred));
@@ -414,9 +419,6 @@ def main():
                   .format(step, loss_value, duration))
             sys.stdout.flush()
 
-            if step % CHECKPOINT_EVERY == 0:
-                save(saver, sess, logdir, step)
-                last_saved_step = step
 
     except KeyboardInterrupt:
         # Introduce a line break after ^C is displayed so save message
